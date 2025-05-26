@@ -244,32 +244,58 @@ Yeelight.prototype.parse = function(data){
  * @param  {String} params The value of "params" is an array. The values in the array are method specific. 
  * @return {Promise} promise
  */
-Yeelight.prototype.command = function(method, params){
+Yeelight.prototype.command = function(method, params) {
   params = [].slice.call(params || []);
-  // The value of "id" is an integer filled by message sender. It will be echoed back in RESULT
-  // message. This is to help request sender to correlate request and response.
-  var id = (Math.random() * 1e3) & 0xff;
-  var request = { id, method, params };
-  var message = JSON.stringify(request);
-  request.promise = new Promise((accept, reject) => {
-    console.debug('<-', message);
-    this.socket.write(message + '\r\n', err => {
-      var respond = false;
-      var timeout = setTimeout(function(){
-        if(!respond) reject(new Error('Network timeout, Yeelight not response'));
-      }, 3000);
-      this.queue[ id ] = function(res){
-        if(respond) return;
-        respond = true;
+  const id = (Math.random() * 1e3) & 0xff;
+  const request = { id, method, params };
+  const message = JSON.stringify(request);
+
+  const self = this;
+
+  const promise = new Promise((resolve, reject) => {
+    let responded = false;
+
+    const timeout = setTimeout(() => {
+      if (!responded) {
+        responded = true;
+        delete self.queue[id];
+        const error = new Error('Network timeout, Yeelight did not respond');
+        self.emit('error', error);
+        // Optionally, resolve with null or a default value
+        resolve(null);
+      }
+    }, 3000);
+
+    self.queue[id] = function(res) {
+      if (responded) return;
+      responded = true;
+      clearTimeout(timeout);
+      delete self.queue[id];
+
+      if (res && res.error) {
+        const error = new Error(res.error.message || 'Unknown error');
+        self.emit('error', error);
+        resolve(null);
+      } else {
+        resolve(res);
+      }
+    };
+
+    self.socket.write(message + '\r\n', function(err) {
+      if (err && !responded) {
+        responded = true;
         clearTimeout(timeout);
-        var err = res.error;
-        if(err) return reject(err);
-        accept(res);
-      };
+        delete self.queue[id];
+        const error = new Error('Socket write error: ' + err.message);
+        self.emit('error', error);
+        resolve(null);
+      }
     });
   });
-  return request.promise;
+
+  return promise;
 };
+
 
 /**
  * get_prop
@@ -290,12 +316,23 @@ Yeelight.prototype.command = function(method, params){
  * {"id":1, "result":["on", "", "100"]}
  * 
  */
-Yeelight.prototype.get_prop = function (prop1, prop2, propN){
-  var props = [].concat.apply([], arguments);
-  return this.command('get_prop', props).then(function(res){
-    return props.reduce(function(item, name, index){
-      item[ name ] = res.result[ index ];
-      return item;
+Yeelight.prototype.get_prop = function (prop1, prop2, propN) {
+  const props = [].concat.apply([], arguments);
+  return this.command('get_prop', props).then(function (res) {
+    // check if res and res.result are valid
+    if (!res || !Array.isArray(res.result)) {
+      const error = new Error('Invalid or empty response from Yeelight device');
+      // throw, return null, or return an object with undefined values
+      // Option 1: return an object with undefined values for all props
+      return props.reduce(function (acc, name) {
+        acc[name] = undefined;
+        return acc;
+      }, {});
+    }
+
+    return props.reduce(function (acc, name, index) {
+      acc[name] = res.result[index];
+      return acc;
     }, {});
   });
 };
